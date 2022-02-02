@@ -205,7 +205,7 @@ std::optional<std::string> wait_for_device() {
             start_discovery();
             discovery_started = true;
         }
-        sleep(1);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 
     if (discovery_started) {
