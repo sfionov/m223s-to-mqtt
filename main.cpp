@@ -267,6 +267,7 @@ std::string state_to_json() {
 }
 
 void on_new_value(const std::vector<uint8_t> &value) {
+    bool need_report = false;
     if (value.size() < 4) {
         fprintf(stderr, "Value too short :(\n");
         return;
@@ -275,21 +276,26 @@ void on_new_value(const std::vector<uint8_t> &value) {
         state.authorized = value[3];
     }
     if (!state.authorized) {
+        need_report = true;
         state = GlobalState{};
     } else if (value[2] == CMD_CODE_QUERY) {
         if (value.size() < 20) {
             fprintf(stderr, "Value too short :(\n");
             return;
         }
+        need_report = true;
         state.program = (Program)value[3];
         state.temperature = (Program)value[5];
         state.hours = value[8];
         state.minutes = value[9];
         state.state = (State)value[11];
     }
-    std::string state_json = state_to_json();
-    int mid = -1;
-    mosquitto_publish(g.mqtt, &mid, M223S_STATE_TOPIC, state_json.size(), state_json.data(), true, false);
+
+    if (need_report) {
+        std::string state_json = state_to_json();
+        int mid = -1;
+        mosquitto_publish(g.mqtt, &mid, M223S_STATE_TOPIC, state_json.size(), state_json.data(), true, false);
+    }
 }
 
 int on_rx_message(sd_bus_message *m, void *userdata, sd_bus_error *ret_error){
