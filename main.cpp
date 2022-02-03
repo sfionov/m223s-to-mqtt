@@ -336,14 +336,14 @@ int on_rx_message(sd_bus_message *m, void *userdata, sd_bus_error *ret_error){
     r = sd_bus_get_property(g.bus, "org.bluez", g.rx_path.c_str(),
                             "org.bluez.GattCharacteristic1", "Value", &e, &reply, "ay");
     if (r >= 0) {
-        LOG("New value:");
+        fmt::print("New value:");
         const void *arr = nullptr;
         size_t len = 0;
         sd_bus_message_read_array(reply, 'y', &arr, &len);
         for (int i = 0; i < len; i++) {
-            LOG(" {:02x}", ((uint8_t *)arr)[i]);
+            fmt::print(stderr, " {:02x}", ((uint8_t *)arr)[i]);
         }
-        LOG("");
+        fmt::print(stderr, "\n");
         on_new_value(std::vector<uint8_t>{(const uint8_t *)arr, (const uint8_t *)arr + len});
     } else {
         LOG("Can't process new RX value: {}", strerror(-r));
