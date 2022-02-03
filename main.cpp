@@ -354,7 +354,7 @@ int on_rx_message(sd_bus_message *m, void *userdata, sd_bus_error *ret_error){
     r = sd_bus_get_property(g.bus, "org.bluez", g.rx_path.c_str(),
                             "org.bluez.GattCharacteristic1", "Value", &e, &reply, "ay");
     if (r >= 0) {
-        fmt::print("New value:");
+        fmt::print(stderr, "New value:");
         const void *arr = nullptr;
         size_t len = 0;
         sd_bus_message_read_array(reply, 'y', &arr, &len);
