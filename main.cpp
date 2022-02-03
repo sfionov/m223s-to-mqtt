@@ -18,6 +18,7 @@
 #define LOG(f, ...) fmt::print(stderr, FMT_STRING(f "\n"), ##__VA_ARGS__)
 #define FMT(f, ...) fmt::format(FMT_STRING(f), ##__VA_ARGS__)
 
+using namespace std::literals::chrono_literals;
 static constexpr char M223S_OFF_TOPIC[] = "home/m223s/off";
 static constexpr char M223S_STATE_TOPIC[] = "home/m223s/state";
 static constexpr char M223S_ADDR[] = "F9:DA:73:71:23:4A";
@@ -26,8 +27,14 @@ static constexpr std::string_view TX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9
 static constexpr int CMD_CODE_AUTH = 0xff;
 static constexpr int CMD_CODE_QUERY = 0x06;
 static constexpr int CMD_CODE_OFF = 0x04;
-static constexpr auto DISCOVERY_MIN_INTERVAL = std::chrono::seconds(60);
-static constexpr auto LOW_ENERGY_MIN_POLLING_INTERVAL = std::chrono::milliseconds(7500);
+static constexpr auto DISCOVERY_MIN_INTERVAL = 60s;
+static constexpr auto LOW_ENERGY_MIN_POLLING_INTERVAL = 7.5s;
+static constexpr auto WRITE_VALUE_TIMEOUT = 10s;
+
+template <typename T>
+std::chrono::microseconds to_usecs(T t) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(t);
+}
 
 enum Program {
     Frying = 0,
@@ -282,17 +289,7 @@ void connect(const std::function<void(const std::string &path)> &f) {
     }
 }
 
-std::string quoted_friendly(std::string_view str) {
-    std::ostringstream os;
-    os << std::quoted(str);
-    std::string ret = os.str();
-    for (auto &ch : ret) {
-        if (ch == '_') ch = ' ';
-    }
-    return ret;
-}
-
-std::string state_to_json() {
+std::string device_state_to_json() {
     return fmt::format("{{ \"authorized\": {}, "
                        "\"device_state\": {}, "
                        "\"program\": {}, "
@@ -333,7 +330,7 @@ void on_new_value(const std::vector<uint8_t> &value) {
     }
 
     if (need_report) {
-        std::string state_json = state_to_json();
+        std::string state_json = device_state_to_json();
         int mid = -1;
         mosquitto_publish(g.mqtt, &mid, M223S_STATE_TOPIC, state_json.size(), state_json.data(), true, false);
     }
@@ -411,7 +408,7 @@ void write_value(const std::vector<uint8_t> &value, std::function<void()> then) 
             (*f)();
             return 0;
         }, userdata);
-    }, new std::function<void()>(std::move(then)), 10'000'000);
+    }, new std::function<void()>(std::move(then)), to_usecs(WRITE_VALUE_TIMEOUT).count());
     sd_bus_message_unrefp(&m);
 }
 
@@ -515,10 +512,10 @@ int main() {
         LOG("mqtt: {}", msg);
     });
 
-    sd_event_add_time_relative(g.event, nullptr, CLOCK_MONOTONIC, 1'000'000, 0, [](sd_event_source *s, uint64_t usec, void *userdata){
+    sd_event_add_time_relative(g.event, nullptr, CLOCK_MONOTONIC, 0, 0, [](sd_event_source *s, uint64_t usec, void *userdata){
         update_m223s_state();
         sd_event_source_set_enabled(s, SD_EVENT_ON);
-        sd_event_source_set_time_relative(s, std::chrono::duration_cast<std::chrono::microseconds>(LOW_ENERGY_MIN_POLLING_INTERVAL).count());
+        sd_event_source_set_time_relative(s, to_usecs(LOW_ENERGY_MIN_POLLING_INTERVAL).count());
         return 0;
     }, nullptr);
     sd_event_add_io(g.event, nullptr, g.event_fd, EPOLLIN, [](sd_event_source *s, int fd, uint32_t revents, void *userdata){
@@ -528,7 +525,7 @@ int main() {
         return 0;
     }, nullptr);
 
-    mosquitto_connect_async(g.mqtt, "127.0.0.1", 1883, 10);
+    mosquitto_connect_async(g.mqtt, "127.0.0.1", 1883, 30);
     mosquitto_loop_start(g.mqtt);
     sd_event_loop(g.event);
     return 0;
