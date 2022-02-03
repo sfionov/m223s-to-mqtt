@@ -298,7 +298,7 @@ std::string friendly(std::string_view sv) {
 
 std::string device_state_to_json() {
     return fmt::format("{{ \"authorized\": {}, "
-                       "\"device_state\": {}, "
+                       "\"state\": {}, "
                        "\"program\": {}, "
                        "\"temperature\": {}, "
                        "\"hours\": {}, "
