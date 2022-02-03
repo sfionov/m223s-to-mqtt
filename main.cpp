@@ -14,6 +14,7 @@
 #include <expat.h>
 #include <magic_enum.hpp>
 #include <fmt/format.h>
+#include <fmt/ostream.h>
 
 #define LOG(f, ...) fmt::print(stderr, FMT_STRING(f "\n"), ##__VA_ARGS__)
 #define FMT(f, ...) fmt::format(FMT_STRING(f), ##__VA_ARGS__)
@@ -289,6 +290,12 @@ void connect(const std::function<void(const std::string &path)> &f) {
     }
 }
 
+std::string friendly(std::string_view sv) {
+    std::string s(sv);
+    std::replace(s.begin(), s.end(), '_', ' ');
+    return s;
+}
+
 std::string device_state_to_json() {
     return fmt::format("{{ \"authorized\": {}, "
                        "\"device_state\": {}, "
@@ -297,8 +304,8 @@ std::string device_state_to_json() {
                        "\"hours\": {}, "
                        "\"minutes\": {}}}",
                        g.device_state.authorized,
-                       g.device_state.state,
-                       g.device_state.program,
+                       std::quoted(friendly(magic_enum::enum_name(g.device_state.state))),
+                       std::quoted(friendly(magic_enum::enum_name(g.device_state.program))),
                        g.device_state.temperature,
                        g.device_state.hours,
                        g.device_state.minutes);
