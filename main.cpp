@@ -373,6 +373,7 @@ void write_value(const std::vector<uint8_t> &value, std::function<void()> then) 
             return 0;
         }, userdata);
     }, new std::function<void()>(then), 10'000'000);
+    sd_bus_message_unrefp(&m);
 }
 
 void start_notify(std::function<void()> then) {
@@ -410,7 +411,7 @@ void query() {
 
 void turnoff() {
     fprintf(stderr, "Sending turnoff\n");
-    write_value({0x55, ctr++, 0x06, 0xaa}, []{
+    write_value({0x55, ctr++, 0x04, 0xaa}, []{
         fprintf(stderr, "Sent turnoff\n");
     });
 }
