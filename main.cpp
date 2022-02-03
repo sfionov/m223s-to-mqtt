@@ -21,7 +21,7 @@ struct {
     mosquitto *mqtt = nullptr;
     sd_event *event = nullptr;
     std::vector<std::string> adapters;
-    std::optional<std::string> device_adapter;
+    std::string device_path;
     std::string tx_path;
     std::string rx_path;
     sd_bus_slot *rx_slot = nullptr;
@@ -65,12 +65,11 @@ struct GlobalState {
 static constexpr char M223S_OFF_TOPIC[] = "home/m223s/off";
 static constexpr char M223S_STATE_TOPIC[] = "home/m223s/state";
 static constexpr char M223S_ADDR[] = "F9:DA:73:71:23:4A";
-static std::string M223S_ADDR_NODE = "dev_F9_DA_73_71_23_4A";
 static constexpr std::string_view RX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 static constexpr std::string_view TX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 static constexpr int CMD_CODE_AUTH = 0xff;
 static constexpr int CMD_CODE_QUERY = 0x06;
-static constexpr int CMD_CODE_OFF = 0x06;
+static constexpr int CMD_CODE_OFF = 0x04;
 static uint8_t ctr;
 
 
@@ -189,20 +188,37 @@ int stop_discovery() {
     return r;
 }
 
-std::optional<std::string> wait_for_device() {
-    std::optional<std::string> ret;
+std::string get_string_property(const std::string &node, const std::string &interface, const std::string &member) {
+    sd_bus_message *reply = nullptr;
+    sd_bus_error e = SD_BUS_ERROR_NULL;
+    int r = sd_bus_get_property(g.bus, "org.bluez", node.c_str(),
+                                interface.c_str(), member.c_str(), &e, &reply, "s");
+    if (r < 0) {
+        return "";
+    }
+    const char *str;
+    sd_bus_message_read(reply, "s", &str);
+    std::string ret_str = str;
+    sd_bus_message_unref(reply);
+    return ret_str;
+}
+
+std::string wait_for_device() {
+    std::string ret;
     bool discovery_started = false;
 
     for (int i = 0; i < 5; i++) {
         for (auto &adapter : g.adapters) {
             auto nodes = introspect("org.bluez", "/org/bluez/" + adapter);
             for (auto &node : nodes.first) {
-                if (node == M223S_ADDR_NODE) {
-                    ret = adapter;
+                std::string node_path = "/org/bluez/" + adapter + "/" + node;
+                std::string addr = get_string_property(node_path, "org.bluez.Device1", "Address");
+                if (addr == M223S_ADDR) {
+                    ret = node_path;
                 }
             }
         }
-        if (ret) {
+        if (!ret.empty()) {
             break;
         }
         if (!discovery_started) {
@@ -234,16 +250,15 @@ std::string get_uuid(const std::string &node, const std::string &interface) {
 }
 
 void connect(const std::function<void(const std::string &path)> &f) {
-    std::string path = "/org/bluez/" + *g.device_adapter + "/" + M223S_ADDR_NODE;
     sd_bus_message *reply = nullptr;
     sd_bus_error e = SD_BUS_ERROR_NULL;
     fprintf(stderr, "Connecting...\n");
-    int r = sd_bus_call_method(g.bus, "org.bluez", path.c_str(),
+    int r = sd_bus_call_method(g.bus, "org.bluez", g.device_path.c_str(),
                                "org.bluez.Device1", "Connect", &e, &reply, "");
     if (r >= 0) {
         fprintf(stderr, "Connected\n");
         sd_bus_message_unref(reply);
-        f(path);
+        f(g.device_path);
     } else {
         fprintf(stderr, "Can't connect\n");
     }
@@ -397,7 +412,7 @@ void start_notify(std::function<void()> then) {
 void authorize(const std::function<void()>& then) {
     start_notify([=]{
         fprintf(stderr, "Writing authorization request...\n");
-        write_value({0x55, ctr++, 0xff, 0xb5, 0x4c, 0x75, 0xb1, 0xb4, 0x0c, 0x88, 0xef, 0xaa}, [=]{
+        write_value({0x55, ctr++, CMD_CODE_AUTH, 0xb5, 0x4c, 0x75, 0xb1, 0xb4, 0x0c, 0x88, 0xef, 0xaa}, [=]{
             fprintf(stderr, "Authorization request sent\n");
             then();
         });
@@ -406,22 +421,22 @@ void authorize(const std::function<void()>& then) {
 
 void query() {
     fprintf(stderr, "Sending query\n");
-    write_value({0x55, ctr++, 0x06, 0xaa}, []{
+    write_value({0x55, ctr++, CMD_CODE_QUERY, 0xaa}, []{
         fprintf(stderr, "Sent query\n");
     });
 }
 
 void turnoff() {
     fprintf(stderr, "Sending turnoff\n");
-    write_value({0x55, ctr++, 0x04, 0xaa}, []{
+    write_value({0x55, ctr++, CMD_CODE_OFF, 0xaa}, []{
         fprintf(stderr, "Sent turnoff\n");
     });
 }
 
 void update_m223s_state() {
     fprintf(stderr, "Updating M223S state\n");
-    g.device_adapter = wait_for_device();
-    if (g.device_adapter) {
+    g.device_path = wait_for_device();
+    if (!g.device_path.empty()) {
         connect([](const std::string &path){
             if (g.rx_path.empty() || g.tx_path.empty()) {
                 initialize_paths(path);
