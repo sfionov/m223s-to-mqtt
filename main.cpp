@@ -27,6 +27,7 @@ static constexpr int CMD_CODE_AUTH = 0xff;
 static constexpr int CMD_CODE_QUERY = 0x06;
 static constexpr int CMD_CODE_OFF = 0x04;
 static constexpr auto DISCOVERY_MIN_INTERVAL = std::chrono::seconds(60);
+static constexpr auto LOW_ENERGY_MIN_POLLING_INTERVAL = std::chrono::milliseconds(7500);
 
 enum Program {
     Frying = 0,
@@ -517,7 +518,7 @@ int main() {
     sd_event_add_time_relative(g.event, nullptr, CLOCK_MONOTONIC, 1'000'000, 0, [](sd_event_source *s, uint64_t usec, void *userdata){
         update_m223s_state();
         sd_event_source_set_enabled(s, SD_EVENT_ON);
-        sd_event_source_set_time_relative(s, 5'000'000);
+        sd_event_source_set_time_relative(s, std::chrono::duration_cast<std::chrono::microseconds>(LOW_ENERGY_MIN_POLLING_INTERVAL).count());
         return 0;
     }, nullptr);
     sd_event_add_io(g.event, nullptr, g.event_fd, EPOLLIN, [](sd_event_source *s, int fd, uint32_t revents, void *userdata){
