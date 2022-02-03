@@ -55,14 +55,14 @@ enum State {
     Keep_warm = 6
 };
 
-struct GlobalState {
+struct DeviceState {
     bool authorized = false;
     Program program = Frying;
     State state = Off;
     int temperature = 0;
     int hours = 0;
     int minutes = 0;
-} state;
+} device_state;
 
 static constexpr char M223S_OFF_TOPIC[] = "home/m223s/off";
 static constexpr char M223S_STATE_TOPIC[] = "home/m223s/state";
@@ -144,13 +144,13 @@ void walk(const std::string &dest, const std::string &path, const std::function<
 int start_discovery(const std::string &adapter_name) {
     sd_bus_message *reply = nullptr;
     sd_bus_error e = SD_BUS_ERROR_NULL;
-    int r = sd_bus_call_method(g.bus, "org.bluez", ("/org/bluez/" + adapter_name).c_str(),
+    int r = sd_bus_call_method(g.bus, "org.bluez", FMT("/org/bluez/{}", adapter_name).c_str(),
                                "org.bluez.Adapter1", "StartDiscovery", &e, &reply, "");
     if (r < 0) {
-        LOG("Can't start discovery on {}: {}", adapter_name.c_str(), r);
+        LOG("Can't start discovery on {}: {}", adapter_name, r);
         return r;
     }
-    LOG("Started discovery on {}", adapter_name.c_str());
+    LOG("Started discovery on {}", adapter_name);
     sd_bus_message_unref(reply);
     return r;
 }
@@ -158,13 +158,13 @@ int start_discovery(const std::string &adapter_name) {
 int stop_discovery(const std::string &adapter_name) {
     sd_bus_message *reply = nullptr;
     sd_bus_error e = SD_BUS_ERROR_NULL;
-    int r = sd_bus_call_method(g.bus, "org.bluez", ("/org/bluez/" + adapter_name).c_str(),
+    int r = sd_bus_call_method(g.bus, "org.bluez", FMT("/org/bluez/{}", adapter_name).c_str(),
                                "org.bluez.Adapter1", "StopDiscovery", &e, &reply, "");
     if (r < 0) {
-        LOG("Can't stop discovery on {}: {}", adapter_name.c_str(), r);
+        LOG("Can't stop discovery on {}: {}", adapter_name, r);
         return r;
     } else {
-        LOG("Stopped discovery on {}", adapter_name.c_str());
+        LOG("Stopped discovery on {}", adapter_name);
     }
     sd_bus_message_unref(reply);
     return r;
@@ -205,6 +205,20 @@ std::string get_string_property(const std::string &node, const std::string &inte
     return ret_str;
 }
 
+bool get_boolean_property(const std::string &node, const std::string &interface, const std::string &member) {
+    sd_bus_message *reply = nullptr;
+    sd_bus_error e = SD_BUS_ERROR_NULL;
+    int r = sd_bus_get_property(g.bus, "org.bluez", node.c_str(),
+                                interface.c_str(), member.c_str(), &e, &reply, "s");
+    if (r < 0) {
+        return false;
+    }
+    bool ret = false;
+    sd_bus_message_read(reply, "b", &ret);
+    sd_bus_message_unref(reply);
+    return ret;
+}
+
 std::string wait_for_device() {
     std::string ret;
     bool discovery_started = false;
@@ -238,6 +252,11 @@ std::string wait_for_device() {
 }
 
 void connect(const std::function<void(const std::string &path)> &f) {
+    if (get_boolean_property(g.device_path, "org.bluez.Device1", "Connected")) {
+        f(g.device_path);
+        return;
+    }
+
     sd_bus_message *reply = nullptr;
     sd_bus_error e = SD_BUS_ERROR_NULL;
     LOG("Connecting...");
@@ -245,6 +264,7 @@ void connect(const std::function<void(const std::string &path)> &f) {
                                "org.bluez.Device1", "Connect", &e, &reply, "");
     if (r >= 0) {
         LOG("Connected");
+        device_state = DeviceState{};
         sd_bus_message_unref(reply);
         f(g.device_path);
     } else {
@@ -264,12 +284,12 @@ std::string quoted_friendly(std::string_view str) {
 
 std::string state_to_json() {
     std::ostringstream os;
-    os << "{ " << std::quoted("authorized") << ": " << (state.authorized ? "true" : "false") << ", "
-        << std::quoted("state") << ": " << quoted_friendly(magic_enum::enum_name(state.state)) << ", "
-        << std::quoted("program") << ": " << quoted_friendly(magic_enum::enum_name(state.program)) << ", "
-        << std::quoted("temperature") << ": " << state.temperature << ", "
-        << std::quoted("hours") << ": " << state.hours << ", "
-        << std::quoted("minutes") << ": " << state.minutes << " }";
+    os << "{ " << std::quoted("authorized") << ": " << (device_state.authorized ? "true" : "false") << ", "
+       << std::quoted("device_state") << ": " << quoted_friendly(magic_enum::enum_name(device_state.state)) << ", "
+       << std::quoted("program") << ": " << quoted_friendly(magic_enum::enum_name(device_state.program)) << ", "
+       << std::quoted("temperature") << ": " << device_state.temperature << ", "
+       << std::quoted("hours") << ": " << device_state.hours << ", "
+       << std::quoted("minutes") << ": " << device_state.minutes << " }";
     return os.str();
 }
 
@@ -280,22 +300,22 @@ void on_new_value(const std::vector<uint8_t> &value) {
         return;
     }
     if (value[2] == CMD_CODE_AUTH) {
-        state.authorized = value[3];
+        device_state.authorized = value[3];
     }
-    if (!state.authorized) {
+    if (!device_state.authorized) {
         need_report = true;
-        state = GlobalState{};
+        device_state = DeviceState{};
     } else if (value[2] == CMD_CODE_QUERY) {
         if (value.size() < 20) {
             LOG("Value too short :(");
             return;
         }
         need_report = true;
-        state.program = (Program)value[3];
-        state.temperature = (Program)value[5];
-        state.hours = value[8];
-        state.minutes = value[9];
-        state.state = (State)value[11];
+        device_state.program = (Program)value[3];
+        device_state.temperature = (Program)value[5];
+        device_state.hours = value[8];
+        device_state.minutes = value[9];
+        device_state.state = (State)value[11];
     }
 
     if (need_report) {
@@ -382,6 +402,11 @@ void write_value(const std::vector<uint8_t> &value, std::function<void()> then) 
 }
 
 void start_notify(std::function<void()> then) {
+    if (get_boolean_property(g.rx_path, "org.bluez.GattCharacteristic1", "Notifying")) {
+        then();
+        return;
+    }
+
     LOG("Starting notify on RX");
     sd_bus_call_method_async(g.bus, nullptr, "org.bluez", g.rx_path.c_str(),
                              "org.bluez.GattCharacteristic1", "StartNotify",
@@ -398,6 +423,10 @@ void start_notify(std::function<void()> then) {
 }
 
 void authorize(const std::function<void()>& then) {
+    if (device_state.authorized) {
+        then();
+        return;
+    }
     start_notify([=]{
         LOG("Writing authorization request...");
         write_value({0x55, ctr++, CMD_CODE_AUTH, 0xb5, 0x4c, 0x75, 0xb1, 0xb4, 0x0c, 0x88, 0xef, 0xaa}, [=]{
