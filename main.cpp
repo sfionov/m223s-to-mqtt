@@ -413,7 +413,7 @@ void write_value(const std::vector<uint8_t> &value, std::function<void()> then) 
 }
 
 void start_notify(std::function<void()> then) {
-    if (get_boolean_property(g.rx_path, "org.bluez.GattCharacteristic1", "Notifying")) {
+    if (g.device_state.authorized) {
         then();
         return;
     }
