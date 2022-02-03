@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <cstdio>
 #include <sys/eventfd.h>
+#include <unistd.h>
 
 #include <systemd/sd-bus.h>
 #include <mosquitto.h>
