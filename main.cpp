@@ -1,12 +1,14 @@
 #include <memory>
+#include <utility>
 #include <vector>
 #include <optional>
 #include <functional>
 #include <thread>
 #include <atomic>
 #include <mutex>
-#include <cstdio>
 #include <iomanip>
+#include <cstdio>
+#include <sys/eventfd.h>
 
 #include <systemd/sd-bus.h>
 #include <mosquitto.h>
@@ -16,12 +18,13 @@
 struct {
     sd_bus *bus = nullptr;
     mosquitto *mqtt = nullptr;
+    sd_event *event = nullptr;
     std::vector<std::string> adapters;
     std::optional<std::string> device_adapter;
     std::string tx_path;
     std::string rx_path;
     sd_bus_slot *rx_slot = nullptr;
-    sd_event *event = nullptr;
+    int event_fd = nullptr;
 } g;
 
 enum Program {
@@ -310,7 +313,7 @@ int on_rx_message(sd_bus_message *m, void *userdata, sd_bus_error *ret_error){
                             "org.bluez.GattCharacteristic1", "Value", &e, &reply, "ay");
     if (r >= 0) {
         fprintf(stderr, "New value:");
-        const void *arr = NULL;
+        const void *arr = nullptr;
         size_t len = 0;
         sd_bus_message_read_array(reply, 'y', &arr, &len);
         for (int i = 0; i < len; i++) {
@@ -346,8 +349,6 @@ void initialize_paths(const std::string &path) {
 }
 
 void write_value(const std::vector<uint8_t> &value, std::function<void()> then) {
-    sd_bus_message *reply = nullptr;
-    sd_bus_error e = SD_BUS_ERROR_NULL;
     int r;
     sd_bus_message *m;
     r = sd_bus_message_new_method_call(g.bus, &m, "org.bluez", g.tx_path.c_str(),
@@ -372,7 +373,7 @@ void write_value(const std::vector<uint8_t> &value, std::function<void()> then) 
             (*f)();
             return 0;
         }, userdata);
-    }, new std::function<void()>(then), 10'000'000);
+    }, new std::function<void()>(std::move(then)), 10'000'000);
     sd_bus_message_unrefp(&m);
 }
 
@@ -445,6 +446,9 @@ int main() {
 
     g.mqtt = mosquitto_new(nullptr, true, nullptr);
     fprintf(stderr, "mqtt initialized\n");
+
+    g.event_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+
     g.adapters = introspect("org.bluez", "/org/bluez").first;
     fprintf(stderr, "Found %zd adapters\n", g.adapters.size());
 
@@ -457,7 +461,8 @@ int main() {
     });
     mosquitto_message_callback_set(g.mqtt, [](mosquitto *, void *, const mosquitto_message *msg){
         fprintf(stderr, "mqtt: message received: %s\n", msg->topic);
-        turnoff();
+        int64_t value = 1;
+        write(g.event_fd, &value, sizeof(value));
     });
     mosquitto_log_callback_set(g.mqtt, [](mosquitto *mst, void *arg, int, const char *msg) {
         fprintf(stderr, "mqtt: %s\n", msg);
@@ -468,6 +473,11 @@ int main() {
         sd_event_source_set_time_relative(s, 10'000'000);
         update_m223s_state();
         return 0;
+    }, nullptr);
+    sd_event_add_io(g.event, nullptr, g.event_fd, EPOLLIN, [](sd_event_source *s, int fd, uint32_t revents, void *userdata){
+        int64_t value = 0;
+        read(g.event_fd, &value, sizeof(value));
+        turnoff();
     }, nullptr);
 
     mosquitto_connect_async(g.mqtt, "127.0.0.1", 1883, 10);
