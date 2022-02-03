@@ -29,7 +29,7 @@ static constexpr int CMD_CODE_AUTH = 0xff;
 static constexpr int CMD_CODE_QUERY = 0x06;
 static constexpr int CMD_CODE_OFF = 0x04;
 static constexpr auto DISCOVERY_MIN_INTERVAL = 60s;
-static constexpr auto LOW_ENERGY_MIN_POLLING_INTERVAL = 7.5s;
+static constexpr auto POLLING_INTERVAL = 7.5s;
 static constexpr auto WRITE_VALUE_TIMEOUT = 10s;
 
 template <typename T>
@@ -291,6 +291,21 @@ void connect(const std::function<void(const std::string &path)> &f) {
 }
 
 void disconnect() {
+    {
+        sd_bus_message *reply = nullptr;
+        sd_bus_error e = SD_BUS_ERROR_NULL;
+        LOG("Stopping notify on RX");
+        int r = sd_bus_call_method(g.bus, "org.bluez", g.rx_path.c_str(),
+                                 "org.bluez.GattCharacteristic1", "StopNotify",
+                                 &e, &reply, "");
+        if (r >= 0) {
+            LOG("Stopped notify on RX");
+            g.device_state = DeviceState{};
+            sd_bus_message_unref(reply);
+        } else {
+            LOG("Can't stop notify on RX");
+        }
+    }
     sd_bus_message *reply = nullptr;
     sd_bus_error e = SD_BUS_ERROR_NULL;
     LOG("Disconnecting...");
@@ -301,7 +316,7 @@ void disconnect() {
         g.device_state = DeviceState{};
         sd_bus_message_unref(reply);
     } else {
-        LOG("Can't connect");
+        LOG("Can't disconnect");
     }
 }
 
@@ -535,12 +550,12 @@ int main() {
     });
 
     sd_event_add_time_relative(g.event, nullptr, CLOCK_MONOTONIC, 0, 0, [](sd_event_source *s, uint64_t usec, void *userdata){
-        update_m223s_state();
-        if (g.device_state.ctr > 120) {
+        if (g.device_state.ctr * POLLING_INTERVAL > 10min) {
             disconnect();
         }
+        update_m223s_state();
         sd_event_source_set_enabled(s, SD_EVENT_ON);
-        sd_event_source_set_time_relative(s, to_usecs(LOW_ENERGY_MIN_POLLING_INTERVAL).count());
+        sd_event_source_set_time_relative(s, to_usecs(POLLING_INTERVAL).count());
         return 0;
     }, nullptr);
     sd_event_add_io(g.event, nullptr, g.event_fd, EPOLLIN, [](sd_event_source *s, int fd, uint32_t revents, void *userdata){
