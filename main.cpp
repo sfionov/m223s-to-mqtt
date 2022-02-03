@@ -234,21 +234,6 @@ std::string wait_for_device() {
     return ret;
 }
 
-std::string get_uuid(const std::string &node, const std::string &interface) {
-    sd_bus_message *reply = nullptr;
-    sd_bus_error e = SD_BUS_ERROR_NULL;
-    int r = sd_bus_get_property(g.bus, "org.bluez", node.c_str(),
-                                interface.c_str(), "UUID", &e, &reply, "s");
-    if (r < 0) {
-        return "";
-    }
-    const char *uuid;
-    sd_bus_message_read(reply, "s", &uuid);
-    std::string uuid_str = uuid;
-    sd_bus_message_unref(reply);
-    return uuid_str;
-}
-
 void connect(const std::function<void(const std::string &path)> &f) {
     sd_bus_message *reply = nullptr;
     sd_bus_error e = SD_BUS_ERROR_NULL;
@@ -345,7 +330,7 @@ int on_rx_message(sd_bus_message *m, void *userdata, sd_bus_error *ret_error){
 
 void initialize_paths(const std::string &path) {
     walk("org.bluez", path, [&](const std::string &node, const std::string &interface){
-        std::string uuid = get_uuid(node, interface);
+        std::string uuid = get_string_property(node, interface, "UUID");
         if (uuid == TX_UUID) {
             g.tx_path = node;
         } else if (uuid == RX_UUID) {
