@@ -53,7 +53,10 @@ enum Program {
     Warming = 11
 };
 
-enum State {
+enum State : int {
+    Disconnected = -3,
+    Connected = -2,
+    Authorized = -1,
     Off = 0,
     Setting = 1,
     Delayed = 2,
@@ -65,12 +68,18 @@ enum State {
 
 struct DeviceState {
     uint8_t ctr = 0;
-    bool authorized = false;
     Program program = Frying;
-    State state = Off;
+    State state = Disconnected;
     int temperature = 0;
     int hours = 0;
     int minutes = 0;
+    void publish();
+
+    std::string to_json();
+
+    void update_state(State state);
+
+    void update_state(State state, Program program, int temperature, int hours, int minutes);
 };
 
 struct {
@@ -275,6 +284,8 @@ void connect(const std::function<void(const std::string &path)> &f) {
         f(g.device_path);
         return;
     }
+    g.device_state = DeviceState{};
+    g.device_state.update_state(Disconnected);
 
     sd_bus_message *reply = nullptr;
     sd_bus_error e = SD_BUS_ERROR_NULL;
@@ -283,7 +294,7 @@ void connect(const std::function<void(const std::string &path)> &f) {
                                "org.bluez.Device1", "Connect", &e, &reply, "");
     if (r >= 0) {
         LOG("Connected");
-        g.device_state = DeviceState{};
+        g.device_state.update_state(Connected);
         sd_bus_message_unref(reply);
         f(g.device_path);
     } else {
@@ -301,7 +312,6 @@ void disconnect() {
                                  &e, &reply, "");
         if (r >= 0) {
             LOG("Stopped notify on RX");
-            g.device_state = DeviceState{};
             sd_bus_message_unref(reply);
         } else {
             LOG("Can't stop notify on RX");
@@ -314,7 +324,6 @@ void disconnect() {
                                "org.bluez.Device1", "Disconnect", &e, &reply, "");
     if (r >= 0) {
         LOG("Disconnected");
-        g.device_state = DeviceState{};
         sd_bus_message_unref(reply);
     } else {
         LOG("Can't disconnect");
@@ -327,50 +336,53 @@ std::string friendly(std::string_view sv) {
     return s;
 }
 
-std::string device_state_to_json() {
-    return fmt::format("{{ \"authorized\": {}, "
-                       "\"state\": {}, "
+std::string DeviceState::to_json() {
+    return fmt::format("{{ \"state\": {}, "
                        "\"program\": {}, "
                        "\"temperature\": {}, "
                        "\"hours\": {}, "
                        "\"minutes\": {}}}",
-                       g.device_state.authorized,
-                       std::quoted(friendly(magic_enum::enum_name(g.device_state.state))),
-                       std::quoted(friendly(magic_enum::enum_name(g.device_state.program))),
-                       g.device_state.temperature,
-                       g.device_state.hours,
-                       g.device_state.minutes);
+                       std::quoted(friendly(magic_enum::enum_name(state))),
+                       std::quoted(friendly(magic_enum::enum_name(program))),
+                       temperature,
+                       hours,
+                       minutes);
+}
+
+void DeviceState::update_state(State state_) {
+    state = state_;
+    publish();
+}
+
+void DeviceState::update_state(State state_, Program program_, int temperature_, int hours_, int minutes_) {
+    state = state_;
+    program = program_;
+    temperature = temperature_;
+    hours = hours_;
+    minutes = minutes_;
+    publish();
+}
+
+void DeviceState::publish() {
+    int mid = -1;
+    std::string state_json = to_json();
+    mosquitto_publish(g.mqtt, &mid, M223S_STATE_TOPIC, state_json.size(), state_json.data(), true, false);
 }
 
 void on_new_value(const std::vector<uint8_t> &value) {
-    bool need_report = false;
     if (value.size() < 4) {
         LOG("Value too short :(");
         return;
     }
     if (value[2] == CMD_CODE_AUTH) {
-        g.device_state.authorized = value[3];
-    }
-    if (!g.device_state.authorized) {
-        need_report = true;
-        g.device_state = DeviceState{};
+        g.device_state.update_state(value[3] ? Authorized : Connected);
+
     } else if (value[2] == CMD_CODE_QUERY) {
         if (value.size() < 20) {
             LOG("Value too short :(");
             return;
         }
-        need_report = true;
-        g.device_state.program = (Program)value[3];
-        g.device_state.temperature = (Program)value[5];
-        g.device_state.hours = value[8];
-        g.device_state.minutes = value[9];
-        g.device_state.state = (State)value[11];
-    }
-
-    if (need_report) {
-        std::string state_json = device_state_to_json();
-        int mid = -1;
-        mosquitto_publish(g.mqtt, &mid, M223S_STATE_TOPIC, state_json.size(), state_json.data(), true, false);
+        g.device_state.update_state((State)value[11], (Program)value[3], value[5], value[8], value[9]);
     }
 }
 
@@ -451,7 +463,7 @@ void write_value(const std::vector<uint8_t> &value, std::function<void()> then) 
 }
 
 void start_notify(std::function<void()> then) {
-    if (g.device_state.authorized) {
+    if (g.device_state.state >= Authorized) {
         then();
         return;
     }
@@ -472,7 +484,7 @@ void start_notify(std::function<void()> then) {
 }
 
 void authorize(const std::function<void()>& then) {
-    if (g.device_state.authorized) {
+    if (g.device_state.state >= Authorized) {
         then();
         return;
     }
