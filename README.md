@@ -10,14 +10,11 @@ Supported features:
 
 ## How to build
 
+- Install required libs
 ```bash
 apt install libsystemd-dev libmosquitto-dev libexpat-dev
-mkdir -p build
-cd build
-cmake ..
-make
-./m223s
 ```
+- Run cmake & make
 
 ## How to pair
 
