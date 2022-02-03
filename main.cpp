@@ -18,17 +18,15 @@
 #define LOG(f, ...) fmt::print(stderr, FMT_STRING(f "\n"), ##__VA_ARGS__)
 #define FMT(f, ...) fmt::format(FMT_STRING(f), ##__VA_ARGS__)
 
-struct {
-    sd_bus *bus = nullptr;
-    mosquitto *mqtt = nullptr;
-    sd_event *event = nullptr;
-    std::vector<std::string> adapters;
-    std::string device_path;
-    std::string tx_path;
-    std::string rx_path;
-    sd_bus_slot *rx_slot = nullptr;
-    int event_fd = -1;
-} g;
+static constexpr char M223S_OFF_TOPIC[] = "home/m223s/off";
+static constexpr char M223S_STATE_TOPIC[] = "home/m223s/state";
+static constexpr char M223S_ADDR[] = "F9:DA:73:71:23:4A";
+static constexpr std::string_view RX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+static constexpr std::string_view TX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+static constexpr int CMD_CODE_AUTH = 0xff;
+static constexpr int CMD_CODE_QUERY = 0x06;
+static constexpr int CMD_CODE_OFF = 0x04;
+static constexpr auto DISCOVERY_MIN_INTERVAL = std::chrono::seconds(60);
 
 enum Program {
     Frying = 0,
@@ -56,24 +54,28 @@ enum State {
 };
 
 struct DeviceState {
+    uint8_t ctr = 0;
     bool authorized = false;
     Program program = Frying;
     State state = Off;
     int temperature = 0;
     int hours = 0;
     int minutes = 0;
-} device_state;
+};
 
-static constexpr char M223S_OFF_TOPIC[] = "home/m223s/off";
-static constexpr char M223S_STATE_TOPIC[] = "home/m223s/state";
-static constexpr char M223S_ADDR[] = "F9:DA:73:71:23:4A";
-static constexpr std::string_view RX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
-static constexpr std::string_view TX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
-static constexpr int CMD_CODE_AUTH = 0xff;
-static constexpr int CMD_CODE_QUERY = 0x06;
-static constexpr int CMD_CODE_OFF = 0x04;
-static uint8_t ctr;
-
+struct {
+    sd_bus *bus = nullptr;
+    mosquitto *mqtt = nullptr;
+    sd_event *event = nullptr;
+    std::vector<std::string> adapters;
+    std::string device_path;
+    std::string tx_path;
+    std::string rx_path;
+    sd_bus_slot *rx_slot = nullptr;
+    int event_fd = -1;
+    std::chrono::steady_clock::time_point last_start_discovery_time{std::chrono::seconds{0}};
+    DeviceState device_state{};
+} g;
 
 sd_bus *init_sd_bus() {
     sd_bus *bus;
@@ -98,7 +100,7 @@ std::pair<std::vector<std::string>, std::string> introspect(const std::string &d
 
     const char *s = nullptr;
     sd_bus_message_read(reply, "s", &s);
-    //std::clog << s << "\n";
+    //LOG("{}", s);
 
     auto parser = XML_ParserCreate("utf-8");
     auto onStartElement = [&](const char *name, const char **attrs){
@@ -141,18 +143,18 @@ void walk(const std::string &dest, const std::string &path, const std::function<
     }
 }
 
-int start_discovery(const std::string &adapter_name) {
+bool start_discovery(const std::string &adapter_name) {
     sd_bus_message *reply = nullptr;
     sd_bus_error e = SD_BUS_ERROR_NULL;
     int r = sd_bus_call_method(g.bus, "org.bluez", FMT("/org/bluez/{}", adapter_name).c_str(),
                                "org.bluez.Adapter1", "StartDiscovery", &e, &reply, "");
     if (r < 0) {
-        LOG("Can't start discovery on {}: {}", adapter_name, r);
-        return r;
+        LOG("Can't start discovery on {}: {}", adapter_name, strerror(-r));
+        return false;
     }
     LOG("Started discovery on {}", adapter_name);
     sd_bus_message_unref(reply);
-    return r;
+    return true;
 }
 
 int stop_discovery(const std::string &adapter_name) {
@@ -170,10 +172,16 @@ int stop_discovery(const std::string &adapter_name) {
     return r;
 }
 
-int start_discovery() {
-    int r = -1;
+bool start_discovery() {
+    if (g.last_start_discovery_time + DISCOVERY_MIN_INTERVAL > std::chrono::steady_clock::now()) {
+        LOG("Skipping discovery");
+        return false;
+    }
+
+    g.last_start_discovery_time = std::chrono::steady_clock::now();
+    bool r = false;
     for (auto &s : g.adapters) {
-        if (int rv = start_discovery(s); rv > 0) {
+        if (bool rv = start_discovery(s); rv) {
             r = rv;
         }
     }
@@ -222,6 +230,7 @@ bool get_boolean_property(const std::string &node, const std::string &interface,
 std::string wait_for_device() {
     std::string ret;
     bool discovery_started = false;
+    bool discovery_tried = false;
 
     for (int i = 0; i < 5; i++) {
         for (auto &adapter : g.adapters) {
@@ -238,9 +247,9 @@ std::string wait_for_device() {
         if (!ret.empty()) {
             break;
         }
-        if (!discovery_started) {
-            start_discovery();
-            discovery_started = true;
+        if (!discovery_tried) {
+            discovery_started = start_discovery();
+            discovery_tried = true;
         }
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
@@ -264,7 +273,7 @@ void connect(const std::function<void(const std::string &path)> &f) {
                                "org.bluez.Device1", "Connect", &e, &reply, "");
     if (r >= 0) {
         LOG("Connected");
-        device_state = DeviceState{};
+        g.device_state = DeviceState{};
         sd_bus_message_unref(reply);
         f(g.device_path);
     } else {
@@ -283,14 +292,18 @@ std::string quoted_friendly(std::string_view str) {
 }
 
 std::string state_to_json() {
-    std::ostringstream os;
-    os << "{ " << std::quoted("authorized") << ": " << (device_state.authorized ? "true" : "false") << ", "
-       << std::quoted("device_state") << ": " << quoted_friendly(magic_enum::enum_name(device_state.state)) << ", "
-       << std::quoted("program") << ": " << quoted_friendly(magic_enum::enum_name(device_state.program)) << ", "
-       << std::quoted("temperature") << ": " << device_state.temperature << ", "
-       << std::quoted("hours") << ": " << device_state.hours << ", "
-       << std::quoted("minutes") << ": " << device_state.minutes << " }";
-    return os.str();
+    return fmt::format("{{ \"authorized\": {}, "
+                       "\"device_state\": {}, "
+                       "\"program\": {}, "
+                       "\"temperature\": {}, "
+                       "\"hours\": {}, "
+                       "\"minutes\": {}}}",
+                       g.device_state.authorized,
+                       g.device_state.state,
+                       g.device_state.program,
+                       g.device_state.temperature,
+                       g.device_state.hours,
+                       g.device_state.minutes);
 }
 
 void on_new_value(const std::vector<uint8_t> &value) {
@@ -300,22 +313,22 @@ void on_new_value(const std::vector<uint8_t> &value) {
         return;
     }
     if (value[2] == CMD_CODE_AUTH) {
-        device_state.authorized = value[3];
+        g.device_state.authorized = value[3];
     }
-    if (!device_state.authorized) {
+    if (!g.device_state.authorized) {
         need_report = true;
-        device_state = DeviceState{};
+        g.device_state = DeviceState{};
     } else if (value[2] == CMD_CODE_QUERY) {
         if (value.size() < 20) {
             LOG("Value too short :(");
             return;
         }
         need_report = true;
-        device_state.program = (Program)value[3];
-        device_state.temperature = (Program)value[5];
-        device_state.hours = value[8];
-        device_state.minutes = value[9];
-        device_state.state = (State)value[11];
+        g.device_state.program = (Program)value[3];
+        g.device_state.temperature = (Program)value[5];
+        g.device_state.hours = value[8];
+        g.device_state.minutes = value[9];
+        g.device_state.state = (State)value[11];
     }
 
     if (need_report) {
@@ -423,13 +436,13 @@ void start_notify(std::function<void()> then) {
 }
 
 void authorize(const std::function<void()>& then) {
-    if (device_state.authorized) {
+    if (g.device_state.authorized) {
         then();
         return;
     }
     start_notify([=]{
         LOG("Writing authorization request...");
-        write_value({0x55, ctr++, CMD_CODE_AUTH, 0xb5, 0x4c, 0x75, 0xb1, 0xb4, 0x0c, 0x88, 0xef, 0xaa}, [=]{
+        write_value({0x55, g.device_state.ctr++, CMD_CODE_AUTH, 0xb5, 0x4c, 0x75, 0xb1, 0xb4, 0x0c, 0x88, 0xef, 0xaa}, [=]{
             LOG("Authorization request sent");
             then();
         });
@@ -438,14 +451,14 @@ void authorize(const std::function<void()>& then) {
 
 void query() {
     LOG("Sending query");
-    write_value({0x55, ctr++, CMD_CODE_QUERY, 0xaa}, []{
+    write_value({0x55, g.device_state.ctr++, CMD_CODE_QUERY, 0xaa}, []{
         LOG("Sent query");
     });
 }
 
 void turnoff() {
     LOG("Sending turnoff");
-    write_value({0x55, ctr++, CMD_CODE_OFF, 0xaa}, []{
+    write_value({0x55, g.device_state.ctr++, CMD_CODE_OFF, 0xaa}, []{
         LOG("Sent turnoff");
     });
 }
@@ -502,9 +515,9 @@ int main() {
     });
 
     sd_event_add_time_relative(g.event, nullptr, CLOCK_MONOTONIC, 1'000'000, 0, [](sd_event_source *s, uint64_t usec, void *userdata){
-        sd_event_source_set_enabled(s, SD_EVENT_ON);
-        sd_event_source_set_time_relative(s, 10'000'000);
         update_m223s_state();
+        sd_event_source_set_enabled(s, SD_EVENT_ON);
+        sd_event_source_set_time_relative(s, 5'000'000);
         return 0;
     }, nullptr);
     sd_event_add_io(g.event, nullptr, g.event_fd, EPOLLIN, [](sd_event_source *s, int fd, uint32_t revents, void *userdata){
