@@ -8,6 +8,17 @@ Supported features:
 1. Reporting state, program, temperature, time to `home/m223s/state` MQTT topic
 2. Turning off by `PRESS` command on `home/m223s/off` MQTT topic
 
+## How to build
+
+```bash
+apt install libsystemd-dev libmosquitto-dev libexpat-dev
+mkdir -p build
+cd build
+cmake ..
+make
+./m223s
+```
+
 ## How to pair
 
 Start program, auth command will return `ff 00 aa` code. `00` means fail. 
