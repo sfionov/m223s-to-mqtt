@@ -24,7 +24,7 @@ struct {
     std::string tx_path;
     std::string rx_path;
     sd_bus_slot *rx_slot = nullptr;
-    int event_fd = nullptr;
+    int event_fd = -1;
 } g;
 
 enum Program {
@@ -478,6 +478,7 @@ int main() {
         int64_t value = 0;
         read(g.event_fd, &value, sizeof(value));
         turnoff();
+        return 0;
     }, nullptr);
 
     mosquitto_connect_async(g.mqtt, "127.0.0.1", 1883, 10);
