@@ -290,6 +290,21 @@ void connect(const std::function<void(const std::string &path)> &f) {
     }
 }
 
+void disconnect() {
+    sd_bus_message *reply = nullptr;
+    sd_bus_error e = SD_BUS_ERROR_NULL;
+    LOG("Disconnecting...");
+    int r = sd_bus_call_method(g.bus, "org.bluez", g.device_path.c_str(),
+                               "org.bluez.Device1", "Disconnect", &e, &reply, "");
+    if (r >= 0) {
+        LOG("Disconnected");
+        g.device_state = DeviceState{};
+        sd_bus_message_unref(reply);
+    } else {
+        LOG("Can't connect");
+    }
+}
+
 std::string friendly(std::string_view sv) {
     std::string s(sv);
     std::replace(s.begin(), s.end(), '_', ' ');
@@ -521,6 +536,9 @@ int main() {
 
     sd_event_add_time_relative(g.event, nullptr, CLOCK_MONOTONIC, 0, 0, [](sd_event_source *s, uint64_t usec, void *userdata){
         update_m223s_state();
+        if (g.device_state.ctr > 120) {
+            disconnect();
+        }
         sd_event_source_set_enabled(s, SD_EVENT_ON);
         sd_event_source_set_time_relative(s, to_usecs(LOW_ENERGY_MIN_POLLING_INTERVAL).count());
         return 0;
