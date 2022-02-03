@@ -4,8 +4,6 @@
 #include <optional>
 #include <functional>
 #include <thread>
-#include <atomic>
-#include <mutex>
 #include <iomanip>
 #include <cstdio>
 #include <sys/eventfd.h>
@@ -14,7 +12,11 @@
 #include <systemd/sd-bus.h>
 #include <mosquitto.h>
 #include <expat.h>
-#include "magic_enum.hpp"
+#include <magic_enum.hpp>
+#include <fmt/format.h>
+
+#define LOG(f, ...) fmt::print(stderr, FMT_STRING(f "\n"), ##__VA_ARGS__)
+#define FMT(f, ...) fmt::format(FMT_STRING(f), ##__VA_ARGS__)
 
 struct {
     sd_bus *bus = nullptr;
@@ -77,7 +79,7 @@ sd_bus *init_sd_bus() {
     sd_bus *bus;
     int r = sd_bus_default_system(&bus);
     if (r < 0) {
-        fprintf(stderr, "Can't open system bus\n");
+        LOG("Can't open system bus");
         exit(0);
     }
     return bus;
@@ -90,7 +92,7 @@ std::pair<std::vector<std::string>, std::string> introspect(const std::string &d
     sd_bus_error e = SD_BUS_ERROR_NULL;
     int r = sd_bus_call_method(g.bus, dest.c_str(), path.c_str(), "org.freedesktop.DBus.Introspectable", "Introspect", &e, &reply, "");
     if (r < 0) {
-        fprintf(stderr, "Can't enumerate nodes: %d\n", r);
+        LOG("Can't enumerate nodes: {}", r);
         return ret;
     }
 
@@ -145,10 +147,10 @@ int start_discovery(const std::string &adapter_name) {
     int r = sd_bus_call_method(g.bus, "org.bluez", ("/org/bluez/" + adapter_name).c_str(),
                                "org.bluez.Adapter1", "StartDiscovery", &e, &reply, "");
     if (r < 0) {
-        fprintf(stderr, "Can't start discovery on %s: %d\n", adapter_name.c_str(), r);
+        LOG("Can't start discovery on {}: {}", adapter_name.c_str(), r);
         return r;
     }
-    fprintf(stderr, "Started discovery on %s\n", adapter_name.c_str());
+    LOG("Started discovery on {}", adapter_name.c_str());
     sd_bus_message_unref(reply);
     return r;
 }
@@ -159,10 +161,10 @@ int stop_discovery(const std::string &adapter_name) {
     int r = sd_bus_call_method(g.bus, "org.bluez", ("/org/bluez/" + adapter_name).c_str(),
                                "org.bluez.Adapter1", "StopDiscovery", &e, &reply, "");
     if (r < 0) {
-        fprintf(stderr, "Can't stop discovery on %s: %d\n", adapter_name.c_str(), r);
+        LOG("Can't stop discovery on {}: {}", adapter_name.c_str(), r);
         return r;
     } else {
-        fprintf(stderr, "Stopped discovery on %s\n", adapter_name.c_str());
+        LOG("Stopped discovery on {}", adapter_name.c_str());
     }
     sd_bus_message_unref(reply);
     return r;
@@ -209,9 +211,10 @@ std::string wait_for_device() {
 
     for (int i = 0; i < 5; i++) {
         for (auto &adapter : g.adapters) {
-            auto nodes = introspect("org.bluez", "/org/bluez/" + adapter);
+            std::string adapter_path = FMT("/org/bluez/{}", adapter);
+            auto nodes = introspect("org.bluez", adapter_path);
             for (auto &node : nodes.first) {
-                std::string node_path = "/org/bluez/" + adapter + "/" + node;
+                std::string node_path = FMT("{}/{}", adapter_path, node);
                 std::string addr = get_string_property(node_path, "org.bluez.Device1", "Address");
                 if (addr == M223S_ADDR) {
                     ret = node_path;
@@ -237,15 +240,15 @@ std::string wait_for_device() {
 void connect(const std::function<void(const std::string &path)> &f) {
     sd_bus_message *reply = nullptr;
     sd_bus_error e = SD_BUS_ERROR_NULL;
-    fprintf(stderr, "Connecting...\n");
+    LOG("Connecting...");
     int r = sd_bus_call_method(g.bus, "org.bluez", g.device_path.c_str(),
                                "org.bluez.Device1", "Connect", &e, &reply, "");
     if (r >= 0) {
-        fprintf(stderr, "Connected\n");
+        LOG("Connected");
         sd_bus_message_unref(reply);
         f(g.device_path);
     } else {
-        fprintf(stderr, "Can't connect\n");
+        LOG("Can't connect");
     }
 }
 
@@ -273,7 +276,7 @@ std::string state_to_json() {
 void on_new_value(const std::vector<uint8_t> &value) {
     bool need_report = false;
     if (value.size() < 4) {
-        fprintf(stderr, "Value too short :(\n");
+        LOG("Value too short :(");
         return;
     }
     if (value[2] == CMD_CODE_AUTH) {
@@ -284,7 +287,7 @@ void on_new_value(const std::vector<uint8_t> &value) {
         state = GlobalState{};
     } else if (value[2] == CMD_CODE_QUERY) {
         if (value.size() < 20) {
-            fprintf(stderr, "Value too short :(\n");
+            LOG("Value too short :(");
             return;
         }
         need_report = true;
@@ -313,17 +316,17 @@ int on_rx_message(sd_bus_message *m, void *userdata, sd_bus_error *ret_error){
     r = sd_bus_get_property(g.bus, "org.bluez", g.rx_path.c_str(),
                             "org.bluez.GattCharacteristic1", "Value", &e, &reply, "ay");
     if (r >= 0) {
-        fprintf(stderr, "New value:");
+        LOG("New value:");
         const void *arr = nullptr;
         size_t len = 0;
         sd_bus_message_read_array(reply, 'y', &arr, &len);
         for (int i = 0; i < len; i++) {
-            fprintf(stderr, " %02x", ((uint8_t *)arr)[i]);
+            LOG(" {:02x}", ((uint8_t *)arr)[i]);
         }
-        fprintf(stderr, "\n");
+        LOG("");
         on_new_value(std::vector<uint8_t>{(const uint8_t *)arr, (const uint8_t *)arr + len});
     } else {
-        fprintf(stderr, "Can't process new RX value: %s", strerror(-r));
+        LOG("Can't process new RX value: {}", strerror(-r));
     }
     return 0;
 }
@@ -342,9 +345,9 @@ void initialize_paths(const std::string &path) {
         int r = sd_bus_match_signal(g.bus, &g.rx_slot, "org.bluez", g.rx_path.c_str(),
                                     "org.freedesktop.DBus.Properties", "PropertiesChanged", on_rx_message, nullptr);
         if (r >= 0) {
-            fprintf(stderr, "Initialized RX notify slot\n");
+            LOG("Initialized RX notify slot");
         } else {
-            fprintf(stderr, "Failed to initialize RX notify slot\n");
+            LOG("Failed to initialize RX notify slot");
         }
     }
 }
@@ -355,17 +358,17 @@ void write_value(const std::vector<uint8_t> &value, std::function<void()> then) 
     r = sd_bus_message_new_method_call(g.bus, &m, "org.bluez", g.tx_path.c_str(),
                                    "org.bluez.GattCharacteristic1", "WriteValue");
     if (r < 0) {
-        fprintf(stderr, "write_value: failed to create method: %s\n", strerror(-r));
+        LOG("write_value: failed to create method: {}", strerror(-r));
         return;
     }
     r = sd_bus_message_append_array(m, 'y', value.data(), value.size());
     if (r < 0) {
-        fprintf(stderr, "write_value: failed to push method parameters - data: %s\n", strerror(-r));
+        LOG("write_value: failed to push method parameters - data: {}", strerror(-r));
         return;
     }
     r = sd_bus_message_append(m, "a{sv}", 1, "type", "s", "command");
     if (r < 0) {
-        fprintf(stderr, "write_value: failed to push method parameters - options: %s\n", strerror(-r));
+        LOG("write_value: failed to push method parameters - options: {}", strerror(-r));
         return;
     }
     sd_bus_call_async(g.bus, nullptr, m, [](sd_bus_message *m, void *userdata, sd_bus_error *ret_error){
@@ -379,15 +382,15 @@ void write_value(const std::vector<uint8_t> &value, std::function<void()> then) 
 }
 
 void start_notify(std::function<void()> then) {
-    fprintf(stderr, "Starting notify on RX\n");
+    LOG("Starting notify on RX");
     sd_bus_call_method_async(g.bus, nullptr, "org.bluez", g.rx_path.c_str(),
                              "org.bluez.GattCharacteristic1", "StartNotify",
                              [](sd_bus_message *m, void *userdata, sd_bus_error *ret_error) {
-        fprintf(stderr, "Finished starting notify on RX");
+        LOG("Finished starting notify on RX");
         if (ret_error && ret_error->message) {
-         fprintf(stderr, ": %s", ret_error->message);
+         LOG(": {}", ret_error->message);
         }
-        fprintf(stderr, "\n");
+        LOG("");
         auto *f = (std::function<void()> *) userdata;
         (*f)();
         return 0;
@@ -396,30 +399,30 @@ void start_notify(std::function<void()> then) {
 
 void authorize(const std::function<void()>& then) {
     start_notify([=]{
-        fprintf(stderr, "Writing authorization request...\n");
+        LOG("Writing authorization request...");
         write_value({0x55, ctr++, CMD_CODE_AUTH, 0xb5, 0x4c, 0x75, 0xb1, 0xb4, 0x0c, 0x88, 0xef, 0xaa}, [=]{
-            fprintf(stderr, "Authorization request sent\n");
+            LOG("Authorization request sent");
             then();
         });
     });
 }
 
 void query() {
-    fprintf(stderr, "Sending query\n");
+    LOG("Sending query");
     write_value({0x55, ctr++, CMD_CODE_QUERY, 0xaa}, []{
-        fprintf(stderr, "Sent query\n");
+        LOG("Sent query");
     });
 }
 
 void turnoff() {
-    fprintf(stderr, "Sending turnoff\n");
+    LOG("Sending turnoff");
     write_value({0x55, ctr++, CMD_CODE_OFF, 0xaa}, []{
-        fprintf(stderr, "Sent turnoff\n");
+        LOG("Sent turnoff");
     });
 }
 
 void update_m223s_state() {
-    fprintf(stderr, "Updating M223S state\n");
+    LOG("Updating M223S state");
     g.device_path = wait_for_device();
     if (!g.device_path.empty()) {
         connect([](const std::string &path){
@@ -428,45 +431,45 @@ void update_m223s_state() {
             }
             if (!g.rx_path.empty() && !g.tx_path.empty()) {
                 authorize([]{
-                    fprintf(stderr, "Ready\n");
+                    LOG("Ready");
                     query();
                 });
             } else {
-                fprintf(stderr, "Services not discovered yet\n");
+                LOG("Services not discovered yet");
             }
         });
     } else {
-        fprintf(stderr, "Device not found\n");
+        LOG("Device not found");
     }
 }
 
 int main() {
     g.bus = init_sd_bus();
     sd_event_new(&g.event);
-    fprintf(stderr, "systemd sd-bus initialized\n");
+    LOG("systemd sd-bus initialized");
 
     g.mqtt = mosquitto_new(nullptr, true, nullptr);
-    fprintf(stderr, "mqtt initialized\n");
+    LOG("mqtt initialized");
 
     g.event_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 
     g.adapters = introspect("org.bluez", "/org/bluez").first;
-    fprintf(stderr, "Found %zd adapters\n", g.adapters.size());
+    LOG("Found {} adapters", g.adapters.size());
 
     mosquitto_connect_callback_set(g.mqtt, [](mosquitto *, void *, int){
         int off_mid = -1;
         mosquitto_subscribe(g.mqtt, &off_mid, M223S_OFF_TOPIC, true);
     });
     mosquitto_disconnect_callback_set(g.mqtt, [](mosquitto *, void *, int){
-        fprintf(stderr, "mqtt: disconnected\n");
+        LOG("mqtt: disconnected");
     });
     mosquitto_message_callback_set(g.mqtt, [](mosquitto *, void *, const mosquitto_message *msg){
-        fprintf(stderr, "mqtt: message received: %s\n", msg->topic);
+        LOG("mqtt: message received: {}", msg->topic);
         int64_t value = 1;
         write(g.event_fd, &value, sizeof(value));
     });
     mosquitto_log_callback_set(g.mqtt, [](mosquitto *mst, void *arg, int, const char *msg) {
-        fprintf(stderr, "mqtt: %s\n", msg);
+        LOG("mqtt: {}", msg);
     });
 
     sd_event_add_time_relative(g.event, nullptr, CLOCK_MONOTONIC, 1'000'000, 0, [](sd_event_source *s, uint64_t usec, void *userdata){
