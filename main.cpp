@@ -23,6 +23,7 @@ using namespace std::literals::chrono_literals;
 static constexpr char M223S_OFF_TOPIC[] = "home/m223s/off";
 static constexpr char M223S_STATE_TOPIC[] = "home/m223s/state";
 static constexpr char M223S_ADDR[] = "F9:DA:73:71:23:4A";
+static constexpr uint8_t M223S_KEY[8] = {0xa4, 0x3b, 0x64, 0xb0, 0xa3, 0xfb, 0xae, 0xcb};
 static constexpr std::string_view RX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 static constexpr std::string_view TX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 static constexpr int CMD_CODE_AUTH = 0xff;
@@ -477,7 +478,10 @@ void authorize(const std::function<void()>& then) {
     }
     start_notify([=]{
         LOG("Writing authorization request...");
-        write_value({0x55, g.device_state.ctr++, CMD_CODE_AUTH, 0xb5, 0x4c, 0x75, 0xb1, 0xb4, 0x0c, 0x88, 0xef, 0xaa}, [=]{
+        std::vector<uint8_t> cmd{0x55, g.device_state.ctr++, CMD_CODE_AUTH};
+        std::copy(std::begin(M223S_KEY), std::end(M223S_KEY), std::back_inserter(cmd));
+        cmd.push_back(0xaa);
+        write_value(cmd, [=]{
             LOG("Authorization request sent");
             then();
         });
