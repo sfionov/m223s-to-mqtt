@@ -209,7 +209,7 @@ bool get_boolean_property(const std::string &node, const std::string &interface,
     sd_bus_message *reply = nullptr;
     sd_bus_error e = SD_BUS_ERROR_NULL;
     int r = sd_bus_get_property(g.bus, "org.bluez", node.c_str(),
-                                interface.c_str(), member.c_str(), &e, &reply, "s");
+                                interface.c_str(), member.c_str(), &e, &reply, "b");
     if (r < 0) {
         return false;
     }
