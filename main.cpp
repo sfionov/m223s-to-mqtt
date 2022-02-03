@@ -456,6 +456,7 @@ int main() {
     });
     mosquitto_message_callback_set(g.mqtt, [](mosquitto *, void *, const mosquitto_message *msg){
         fprintf(stderr, "mqtt: message received: %s\n", msg->topic);
+        turnoff();
     });
     mosquitto_log_callback_set(g.mqtt, [](mosquitto *mst, void *arg, int, const char *msg) {
         fprintf(stderr, "mqtt: %s\n", msg);
