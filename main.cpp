@@ -473,7 +473,8 @@ void write_request(const std::vector<uint8_t> &value, std::function<void()> then
         auto node = g.request_handlers.extract(req_num);
         if (!node.empty()) {
             LOG("Timed out writing request {}", (int)req_num);
-            node.mapped()();
+            disconnect();
+            // node.mapped()();
         }
         return 0;
     }, (void *)(uintptr_t)req_num);
