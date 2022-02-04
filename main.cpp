@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <sys/eventfd.h>
 #include <unistd.h>
+#include <map>
 
 #include <systemd/sd-bus.h>
 #include <mosquitto.h>
@@ -29,12 +30,13 @@ static constexpr std::string_view TX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9
 static constexpr int CMD_CODE_AUTH = 0xff;
 static constexpr int CMD_CODE_QUERY = 0x06;
 static constexpr int CMD_CODE_OFF = 0x04;
+static constexpr int CMD_CODE_PING = 0x01;
 static constexpr auto DISCOVERY_MIN_INTERVAL = 60s;
 static constexpr auto POLLING_INTERVAL = 7.5s;
 static constexpr auto WRITE_VALUE_TIMEOUT = 10s;
 
 template <typename T>
-std::chrono::microseconds to_usecs(T t) {
+std::chrono::microseconds to_us(T t) {
     return std::chrono::duration_cast<std::chrono::microseconds>(t);
 }
 
@@ -94,6 +96,7 @@ struct {
     int event_fd = -1;
     std::chrono::steady_clock::time_point last_start_discovery_time{std::chrono::seconds{0}};
     DeviceState device_state{};
+    std::map<uint8_t, std::function<void()>> request_handlers;
 } g;
 
 sd_bus *init_sd_bus() {
@@ -286,6 +289,7 @@ void connect(const std::function<void(const std::string &path)> &f) {
     }
     g.device_state = DeviceState{};
     g.device_state.update_state(Disconnected);
+    g.request_handlers.clear();
 
     sd_bus_message *reply = nullptr;
     sd_bus_error e = SD_BUS_ERROR_NULL;
@@ -384,6 +388,10 @@ void on_new_value(const std::vector<uint8_t> &value) {
         }
         g.device_state.update_state((State)value[11], (Program)value[3], value[5], value[8], value[9]);
     }
+    auto node = g.request_handlers.extract(value[1]);
+    if (!node.empty() && node.mapped()) {
+        (node.mapped())();
+    }
 }
 
 int on_rx_message(sd_bus_message *m, void *userdata, sd_bus_error *ret_error){
@@ -433,7 +441,7 @@ void initialize_paths(const std::string &path) {
     }
 }
 
-void write_value(const std::vector<uint8_t> &value, std::function<void()> then) {
+void write_request(const std::vector<uint8_t> &value, std::function<void()> then) {
     int r;
     sd_bus_message *m;
     r = sd_bus_message_new_method_call(g.bus, &m, "org.bluez", g.tx_path.c_str(),
@@ -442,23 +450,33 @@ void write_value(const std::vector<uint8_t> &value, std::function<void()> then) 
         LOG("write_value: failed to create method: {}", strerror(-r));
         return;
     }
-    r = sd_bus_message_append_array(m, 'y', value.data(), value.size());
+    uint8_t *space = nullptr;
+    r = sd_bus_message_append_array_space(m, 'y', value.size() + 3, (void **)&space);
     if (r < 0) {
         LOG("write_value: failed to push method parameters - data: {}", strerror(-r));
         return;
     }
+    uint8_t req_num = g.device_state.ctr++;
+    space[0] = 0x55;
+    space[1] = req_num;
+    memcpy(&space[2], value.data(), value.size());
+    space[2 + value.size()] = 0xaa;
     r = sd_bus_message_append(m, "a{sv}", 1, "type", "s", "command");
     if (r < 0) {
         LOG("write_value: failed to push method parameters - options: {}", strerror(-r));
         return;
     }
-    sd_bus_call_async(g.bus, nullptr, m, [](sd_bus_message *m, void *userdata, sd_bus_error *ret_error){
-        return sd_event_add_time_relative(g.event, nullptr, CLOCK_MONOTONIC, 100'000, 0, [](sd_event_source *s, uint64_t usec, void *userdata){
-            auto *f = (std::function<void()> *)userdata;
-            (*f)();
-            return 0;
-        }, userdata);
-    }, new std::function<void()>(std::move(then)), to_usecs(WRITE_VALUE_TIMEOUT).count());
+    g.request_handlers[req_num] = then;
+    sd_bus_call_async(g.bus, nullptr, m, nullptr, nullptr, to_us(WRITE_VALUE_TIMEOUT).count());
+    sd_event_add_time_relative(g.event, nullptr, CLOCK_MONOTONIC, to_us(2s).count(), 0, [](sd_event_source *s, uint64_t usec, void *userdata){
+        auto req_num = (uint8_t)(intptr_t)userdata;
+        auto node = g.request_handlers.extract(req_num);
+        if (!node.empty()) {
+            LOG("Timed out writing request {}", (int)req_num);
+            node.mapped()();
+        }
+        return 0;
+    }, (void *)(uintptr_t)req_num);
     sd_bus_message_unrefp(&m);
 }
 
@@ -490,10 +508,9 @@ void authorize(const std::function<void()>& then) {
     }
     start_notify([=]{
         LOG("Writing authorization request...");
-        std::vector<uint8_t> cmd{0x55, g.device_state.ctr++, CMD_CODE_AUTH};
+        std::vector<uint8_t> cmd{CMD_CODE_AUTH};
         std::copy(std::begin(M223S_KEY), std::end(M223S_KEY), std::back_inserter(cmd));
-        cmd.push_back(0xaa);
-        write_value(cmd, [=]{
+        write_request(cmd, [=]{
             LOG("Authorization request sent");
             then();
         });
@@ -501,15 +518,18 @@ void authorize(const std::function<void()>& then) {
 }
 
 void query() {
-    LOG("Sending query");
-    write_value({0x55, g.device_state.ctr++, CMD_CODE_QUERY, 0xaa}, []{
-        LOG("Sent query");
+    LOG("Sending ping");
+    write_request({CMD_CODE_PING}, []{
+        LOG("Sent ping, sending query");
+        write_request({CMD_CODE_QUERY}, []{
+            LOG("Sent query");
+        });
     });
 }
 
 void turnoff() {
     LOG("Sending turnoff");
-    write_value({0x55, g.device_state.ctr++, CMD_CODE_OFF, 0xaa}, []{
+    write_request({CMD_CODE_OFF}, []{
         LOG("Sent turnoff");
     });
 }
@@ -566,12 +586,12 @@ int main() {
     });
 
     sd_event_add_time_relative(g.event, nullptr, CLOCK_MONOTONIC, 0, 0, [](sd_event_source *s, uint64_t usec, void *userdata){
-        if (g.device_state.ctr * POLLING_INTERVAL > 10min) {
+        if (g.device_state.ctr * POLLING_INTERVAL > 24h) {
             disconnect();
         }
         update_m223s_state();
         sd_event_source_set_enabled(s, SD_EVENT_ON);
-        sd_event_source_set_time_relative(s, to_usecs(POLLING_INTERVAL).count());
+        sd_event_source_set_time_relative(s, to_us(POLLING_INTERVAL).count());
         return 0;
     }, nullptr);
     sd_event_add_io(g.event, nullptr, g.event_fd, EPOLLIN, [](sd_event_source *s, int fd, uint32_t revents, void *userdata){
